@@ -545,6 +545,10 @@ PatAdj=-92
 VerBytes=C20800
 VerAdj=25
 
+[CGameSprite::ClearMarshal]
+PatBytes=558BEC83EC08538BC1C745FC07000000
+PatAdj=0
+
 [CGameSprite::ExecuteAction]
 PatBytes=33C58945FC53568BF1C7859CF6FFFF000000000FB786F80200008D9EF802000057C786A003000001000000
 PatAdj=-14
@@ -596,6 +600,22 @@ PatAdj=-13
 [CGameSprite::GetQuickButtons]
 PatBytes=8DB7800A000033DB8975888BF78B7D88895D848D4900
 PatAdj=-138
+
+[CGameSprite::Marshal()_AllocateHook]
+PatBytes=05D40200000106FF36
+PatAdj=9
+
+[CGameSprite::Marshal()_DynamicStartHook1]
+PatBytes=BFD4020000897DA885C0
+PatAdj=0
+
+[CGameSprite::Marshal()_DynamicStartHook2]
+PatBytes=8DBED4020000897DA8
+PatAdj=0
+
+[CGameSprite::Marshal()_SkipMemsetHook]
+PatBytes=8B7D988907FF366A0050
+PatAdj=5
 
 [CGameSprite::MemorizeSpell]
 PatBytes=8B5D188945E48B450C568BF18945E8
@@ -676,6 +696,10 @@ VerAdj=41
 [CGameSprite::Shatter]
 PatBytes=8D55C8FF7610B840020000
 PatAdj=-38
+
+[CGameSprite::Unmarshal()_Hook]
+PatBytes=89B578FFFFFFC7835C37000001000000
+PatAdj=16
 
 [CGameSprite::UnmemorizeSpellInnate]
 PatBytes=8BBC81A00800008D505F

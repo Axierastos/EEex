@@ -10,6 +10,10 @@ EEex_ComplexStatSpace = 0x0
 EEex_VolatileStorageDefinitions = {}
 EEex_VolatileStorageSpace = 0x0
 
+EEex_MarshalRequestors = {}
+EEex_HookMarshalDynamicStartVal = nil
+EEex_HookMarshalCreatureData = {}
+
 function EEex_RegisterVolatileField(name, attributeTable)
 
 	-- attributeTable["construct"]
@@ -182,6 +186,134 @@ function EEex_HookConstructCreature(fromFile, toStruct)
 
 end
 
+-----------------------------
+-- Marshal Functions Start --
+-----------------------------
+
+--[[
+
+table keys include the following functions:
+
+["marshalSize"] = function(creatureData) => Should return the size of the field that the requestor is about to write.
+["marshal"] = function(creatureData, marshalAddress) => Should write the field to [marshalAddress].
+["unmarshal"] = function(creatureData, address, fieldSize) => Should read the field from [address].
+["default"] = function(creatureData) => The field wasn't found on the creature when reading; should read the field using a default value.
+
+Example:
+
+EEex_AddMarshalRequestor("B3HelloWorldTest", {
+	["marshalSize"] = function(creatureData)
+		Infinity_DisplayString("[marshalSize] on "..EEex_ToHex(EEex_GetActorIDShare(creatureData)))
+		return 13
+	end,
+	["marshal"] = function(creatureData, marshalAddress)
+		Infinity_DisplayString("[marshal] on "..EEex_ToHex(EEex_GetActorIDShare(creatureData)))
+		EEex_WriteString(marshalAddress, "Hello World!")
+	end,
+	["unmarshal"] = function(creatureData, address, fieldSize)
+		Infinity_DisplayString("Read stored field on "..EEex_ToHex(EEex_GetActorIDShare(creatureData))..": \""..EEex_ReadString(address).."\"")
+	end,
+	["default"] = function(creatureData)
+		Infinity_DisplayString("I wasn't stored on the cre: "..EEex_ToHex(EEex_GetActorIDShare(creatureData)))
+	end,
+})
+
+--]]
+
+function EEex_AddMarshalRequestor(fieldName, table)
+	EEex_MarshalRequestors[fieldName] = table
+end
+
+function EEex_HookMarshalCreatureSize(cre)
+
+	EEex_HookMarshalCreatureData = {}
+
+	-- Account for terminating null in EEex data
+	local additionalSize = 1
+
+	for fieldName, requestor in pairs(EEex_MarshalRequestors) do
+		
+		local requestedSize = requestor.marshalSize(cre)
+		EEex_HookMarshalCreatureData[fieldName] = requestedSize
+
+		--                                 name + null + datasize + data
+		additionalSize = additionalSize + #fieldName + 1 + 4 + requestedSize
+	end
+
+	EEex_HookMarshalDynamicStartVal = 0x2D4 + additionalSize
+	return additionalSize
+
+end
+
+function EEex_HookMarshalDynamicStart()
+	return EEex_HookMarshalDynamicStartVal
+end
+
+function EEex_HookMarshalCreature(cre, allocatedMem)
+
+	local currentAddress = allocatedMem + 0x2D4
+
+	for fieldName, requestor in pairs(EEex_MarshalRequestors) do
+		
+		EEex_WriteString(currentAddress, fieldName)
+		currentAddress = currentAddress + #fieldName + 1
+
+		local requestedSize = EEex_HookMarshalCreatureData[fieldName]
+		EEex_WriteDword(currentAddress, requestedSize)
+		currentAddress = currentAddress + 0x4
+
+		requestor.marshal(cre, currentAddress)
+		currentAddress = currentAddress + requestedSize
+
+	end
+
+	EEex_WriteByte(currentAddress, 0x0)
+
+end
+
+function EEex_HookUnmarshalCreature(CGameSprite, pCreature)
+
+	local seenFields = {}
+	local knownSpellsOffset = EEex_ReadDword(pCreature + 0x2A0)
+	local memorizationInfoOffset = EEex_ReadDword(pCreature + 0x2A8)
+
+	if knownSpellsOffset ~= 0x2D4 and memorizationInfoOffset ~= 0x2D4 then
+
+		local currentAddress = pCreature + 0x2D4
+		local currentFieldName = EEex_ReadString(currentAddress)
+
+		while currentFieldName ~= "" do
+			
+			seenFields[currentFieldName] = true
+			currentAddress = currentAddress + #currentFieldName + 1
+	
+			local fieldSize = EEex_ReadDword(currentAddress)
+			currentAddress = currentAddress + 0x4
+	
+			local requestor = EEex_MarshalRequestors[currentFieldName]
+			if requestor then
+				requestor.unmarshal(CGameSprite, currentAddress, fieldSize)
+			end
+			
+			currentAddress = currentAddress + fieldSize
+			currentFieldName = EEex_ReadString(currentAddress)
+	
+		end
+
+	end
+
+	for fieldName, requestor in pairs(EEex_MarshalRequestors) do
+		if not seenFields[fieldName] then
+			requestor.default(CGameSprite)
+		end
+	end
+
+end
+
+---------------------------
+-- Marshal Functions End --
+---------------------------
+
 function EEex_HookDeconstructCreature(cre)
 
 	local newStats = EEex_ReadDword(cre + 0x3B18)
@@ -247,7 +379,7 @@ function EEex_HookCopyStats(cre)
 
 end
 
-function B3Cre_InstallCreatureHook()
+function EEex_InstallCreatureHooks()
 
 	EEex_DisableCodeProtection()
 
@@ -300,6 +432,222 @@ function B3Cre_InstallCreatureHook()
 	-- Install EEex_HookConstructCreature
 	EEex_WriteAssembly(EEex_Label("HookConstructCreature1"), {{hookAddressLoad, 4, 4}})
 	EEex_WriteAssembly(EEex_Label("HookConstructCreature2"), {{hookAddressLoad, 4, 4}})
+
+	-------------------------
+	-- Marshal Hooks Start --
+	-------------------------
+
+	local hookNameMarshalSize = "EEex_HookMarshalCreatureSize"
+	local hookNameMarshalSizeAddress = EEex_Malloc(#hookNameMarshalSize + 1)
+	EEex_WriteString(hookNameMarshalSizeAddress, hookNameMarshalSize)
+
+	local hookNameMarshal = "EEex_HookMarshalCreature"
+	local hookNameMarshalAddress = EEex_Malloc(#hookNameMarshal + 1)
+	EEex_WriteString(hookNameMarshalAddress, hookNameMarshal)
+
+	local hookMarshalAddress = EEex_Label("CGameSprite::Marshal()_AllocateHook")
+
+	local marshalHook = EEex_WriteAssemblyAuto({[[
+
+		!push_registers
+
+		!push_dword ]], {hookNameMarshalSizeAddress, 4}, [[
+		!push_[dword] *_g_lua
+		!call >_lua_getglobal
+		!add_esp_byte 08
+
+		!push_ebx
+		!fild_[esp]
+		!sub_esp_byte 04
+		!fstp_qword:[esp]
+		!push_[dword] *_g_lua
+		!call >_lua_pushnumber
+		!add_esp_byte 0C
+
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 01
+		!push_byte 01
+		!push_[dword] *_g_lua
+		!call >_lua_pcallk
+		!add_esp_byte 18
+
+		!push_byte 00
+		!push_byte FF
+		!push_[dword] *_g_lua
+		!call >_lua_tonumberx
+		!add_esp_byte 0C
+
+		!call >__ftol2_sse
+		!mov_esi_[esp+byte] 14
+		!add_esi_eax
+		!mov_ecx_[ebp+byte] 0C
+		!add_[ecx]_eax
+
+		!push_byte FE
+		!push_[dword] *_g_lua
+		!call >_lua_settop
+		!add_esp_byte 08
+
+		!push_esi
+		!call >_malloc
+		!add_esp_byte 04
+		!mov_edi_eax
+
+		!push_esi
+		!push_byte 00
+		!push_edi
+		!call >_memset
+		!add_esp_byte 0C
+
+		!push_dword ]], {hookNameMarshalAddress, 4}, [[
+		!push_[dword] *_g_lua
+		!call >_lua_getglobal
+		!add_esp_byte 08
+
+		!push_ebx
+		!fild_[esp]
+		!sub_esp_byte 04
+		!fstp_qword:[esp]
+		!push_[dword] *_g_lua
+		!call >_lua_pushnumber
+		!add_esp_byte 0C
+
+		!push_edi
+		!fild_[esp]
+		!sub_esp_byte 04
+		!fstp_qword:[esp]
+		!push_[dword] *_g_lua
+		!call >_lua_pushnumber
+		!add_esp_byte 0C
+
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 02
+		!push_[dword] *_g_lua
+		!call >_lua_pcallk
+		!add_esp_byte 18
+
+		!mov_eax_edi
+		!pop_registers
+
+		!sub_esp_byte 0C
+		!jmp_dword ]], {hookMarshalAddress + 0x5, 4, 4},
+
+	})
+	EEex_WriteAssembly(hookMarshalAddress, {"!jmp_dword", {marshalHook, 4, 4}})
+	local skipMemsetAddress = EEex_Label("CGameSprite::Marshal()_SkipMemsetHook")
+	EEex_WriteAssembly(skipMemsetAddress, {"!jmp_dword", {skipMemsetAddress + 0xA, 4, 4}})
+
+	local hookNameMarshalDynamicStart = "EEex_HookMarshalDynamicStart"
+	local hookNameMarshalDynamicStartAddress = EEex_Malloc(#hookNameMarshalDynamicStart + 1)
+	EEex_WriteString(hookNameMarshalDynamicStartAddress, hookNameMarshalDynamicStart)
+
+	local dynamicStartHook = EEex_WriteAssemblyAuto({[[
+
+		!push_eax
+		!push_ebx
+		!push_ecx
+		!push_edx
+		!push_esi
+
+		!push_dword ]], {hookNameMarshalDynamicStartAddress, 4}, [[
+		!push_[dword] *_g_lua
+		!call >_lua_getglobal
+		!add_esp_byte 08
+
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 01
+		!push_byte 00
+		!push_[dword] *_g_lua
+		!call >_lua_pcallk
+		!add_esp_byte 18
+
+		!push_byte 00
+		!push_byte FF
+		!push_[dword] *_g_lua
+		!call >_lua_tonumberx
+		!add_esp_byte 0C
+		!call >__ftol2_sse
+		!mov_edi_eax
+
+		!push_byte FE
+		!push_[dword] *_g_lua
+		!call >_lua_settop
+		!add_esp_byte 08
+
+		!pop_esi
+		!pop_edx
+		!pop_ecx
+		!pop_ebx
+		!pop_eax
+		!ret
+
+	]]})
+	EEex_WriteAssembly(EEex_Label("CGameSprite::Marshal()_DynamicStartHook1"), {"!call", {dynamicStartHook, 4, 4}})
+	local dynamicStartWrapper = EEex_WriteAssemblyAuto({[[
+		!call ]], {dynamicStartHook, 4, 4}, [[
+		!add_edi_esi
+		!ret
+	]]})
+	EEex_WriteAssembly(EEex_Label("CGameSprite::Marshal()_DynamicStartHook2"), {"!call", {dynamicStartWrapper, 4, 4}, "!nop"})
+
+	local hookNameUnmarshal = "EEex_HookUnmarshalCreature"
+	local hookNameUnmarshalAddress = EEex_Malloc(#hookNameUnmarshal + 1)
+	EEex_WriteString(hookNameUnmarshalAddress, hookNameUnmarshal)
+
+	local hookUnmarshalAddress = EEex_Label("CGameSprite::Unmarshal()_Hook")
+
+	local unmarshalHook = EEex_WriteAssemblyAuto({[[
+
+		!call >CGameSprite::ClearMarshal
+
+		!push_registers
+
+		!push_dword ]], {hookNameUnmarshalAddress, 4}, [[
+		!push_[dword] *_g_lua
+		!call >_lua_getglobal
+		!add_esp_byte 08
+
+		!push_ebx
+		!fild_[esp]
+		!sub_esp_byte 04
+		!fstp_qword:[esp]
+		!push_[dword] *_g_lua
+		!call >_lua_pushnumber
+		!add_esp_byte 0C
+
+		!push_esi
+		!fild_[esp]
+		!sub_esp_byte 04
+		!fstp_qword:[esp]
+		!push_[dword] *_g_lua
+		!call >_lua_pushnumber
+		!add_esp_byte 0C
+
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 00
+		!push_byte 02
+		!push_[dword] *_g_lua
+		!call >_lua_pcallk
+		!add_esp_byte 18
+
+		!pop_registers
+		!jmp_dword ]], {hookUnmarshalAddress + 0x5, 4, 4},
+
+	})
+	EEex_WriteAssembly(hookUnmarshalAddress, {"!jmp_dword", {unmarshalHook, 4, 4}})
+
+	-----------------------
+	-- Marshal Hooks End --
+	-----------------------
 
 	local hookNameReload = "EEex_HookReloadStats"
 	local hookNameReloadAddress = EEex_Malloc(#hookNameReload + 1)
@@ -613,4 +961,4 @@ function B3Cre_InstallCreatureHook()
 
 	EEex_EnableCodeProtection()
 end
-B3Cre_InstallCreatureHook()
+EEex_InstallCreatureHooks()
